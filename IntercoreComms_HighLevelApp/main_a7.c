@@ -10,19 +10,19 @@
 // - application (establish a connection with a real-time capable application).
 // - eventloop (system invokes handlers for timer events)
 
-#include <signal.h>
-#include <string.h>
-#include <stdio.h>
 #include <ctype.h>
-#include <stdbool.h>
 #include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
-#include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
-#include <applibs/log.h>
 #include <applibs/application.h>
+#include <applibs/log.h>
 
 #include "eventloop_timer_utilities.h"
 
@@ -42,7 +42,8 @@ typedef enum {
     ExitCode_Init_Connection = 7,
     ExitCode_Init_SetSockOpt = 8,
     ExitCode_Init_RegisterIo = 9,
-    ExitCode_Main_EventLoopFail = 10
+    ExitCode_Main_EventLoopFail = 10,
+    ExitCode_ForceQuit = 11,
 } ExitCode;
 
 static int sockFd = -1;
@@ -60,11 +61,14 @@ static void SocketEventHandler(EventLoop *el, int fd, EventLoop_IoEvents events,
 static ExitCode InitHandlers(void);
 static void CloseHandlers(void);
 
+static void ForceQuitApp(void) {
+    exitCode = ExitCode_ForceQuit;
+}
+
 /// <summary>
 ///     Signal handler for termination requests. This handler must be async-signal-safe.
 /// </summary>
-static void TerminationHandler(int signalNumber)
-{
+static void TerminationHandler(int signalNumber) {
     // Don't use Log_Debug here, as it is not guaranteed to be async-signal-safe.
     exitCode = ExitCode_TermHandler_SigTerm;
 }
@@ -72,8 +76,7 @@ static void TerminationHandler(int signalNumber)
 /// <summary>
 ///     Handle send timer event by writing data to the real-time capable application.
 /// </summary>
-static void SendTimerEventHandler(EventLoopTimer *timer)
-{
+static void SendTimerEventHandler(EventLoopTimer *timer) {
     if (ConsumeEventLoopTimerEvent(timer) != 0) {
         exitCode = ExitCode_TimerHandler_Consume;
         return;
@@ -85,8 +88,7 @@ static void SendTimerEventHandler(EventLoopTimer *timer)
 /// <summary>
 ///     Helper function for TimerEventHandler sends message to real-time capable application.
 /// </summary>
-static void SendMessageToRTApp(void)
-{
+static void SendMessageToRTApp(void) {
     // Send "hl-app-to-rt-app-%02d" message to RTApp, where the number cycles from 00 to 99.
     static int iter = 0;
 
@@ -106,8 +108,7 @@ static void SendMessageToRTApp(void)
 /// <summary>
 ///     Handle socket event by reading incoming data from real-time capable application.
 /// </summary>
-static void SocketEventHandler(EventLoop *el, int fd, EventLoop_IoEvents events, void *context)
-{
+static void SocketEventHandler(EventLoop *el, int fd, EventLoop_IoEvents events, void *context) {
     // Read response from real-time capable application.
     // If the RTApp has sent more than 32 bytes, then truncate.
     char rxBuf[32];
@@ -135,8 +136,7 @@ static void SocketEventHandler(EventLoop *el, int fd, EventLoop_IoEvents events,
 ///     ExitCode_Success if all resources were allocated successfully; otherwise another
 ///     ExitCode value which indicates the specific failure.
 /// </returns>
-static ExitCode InitHandlers(void)
-{
+static ExitCode InitHandlers(void) {
     struct sigaction action;
     memset(&action, 0, sizeof(struct sigaction));
     action.sa_handler = TerminationHandler;
@@ -186,8 +186,7 @@ static ExitCode InitHandlers(void)
 /// </summary>
 /// <param name="fd">File descriptor to close</param>
 /// <param name="fdName">File descriptor name to use in error message</param>
-static void CloseFdAndPrintError(int fd, const char *fdName)
-{
+static void CloseFdAndPrintError(int fd, const char *fdName) {
     if (fd >= 0) {
         int result = close(fd);
         if (result != 0) {
@@ -199,8 +198,7 @@ static void CloseFdAndPrintError(int fd, const char *fdName)
 /// <summary>
 ///     Clean up the resources previously allocated.
 /// </summary>
-static void CloseHandlers(void)
-{
+static void CloseHandlers(void) {
     DisposeEventLoopTimer(sendTimer);
     EventLoop_UnregisterIo(eventLoop, socketEventReg);
     EventLoop_Close(eventLoop);
@@ -209,8 +207,7 @@ static void CloseHandlers(void)
     CloseFdAndPrintError(sockFd, "Socket");
 }
 
-int main(void)
-{
+int main(void) {
     Log_Debug("High-level intercore comms application\n");
     Log_Debug("Sends data to, and receives data from a real-time capable application.\n");
 

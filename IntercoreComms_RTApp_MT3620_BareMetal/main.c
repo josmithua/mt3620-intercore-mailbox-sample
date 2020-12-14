@@ -14,36 +14,26 @@
 /* Copyright (c) Codethink Ltd. All rights reserved.
    Licensed under the MIT License. */
 
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-#include "lib/mt3620/gpt.h"
 #include "lib/CPUFreq.h"
-#include "lib/VectorTable.h"
-#include "lib/NVIC.h"
 #include "lib/GPIO.h"
-#include "lib/UART.h"
-#include "lib/Print.h"
 #include "lib/GPT.h"
+#include "lib/NVIC.h"
+#include "lib/Print.h"
+#include "lib/UART.h"
+#include "lib/VectorTable.h"
+#include "lib/mt3620/gpt.h"
 
 #include "Socket.h"
 
-#define NUM_BUTTONS 2
-
-typedef enum {
-    TIMER_BUTTONS,
-    TIMER_SEND_MSG,
-    TIMER_COUNT
-} appTimers;
-
 // Drivers
-static UART   *debug              = NULL;
-static GPT    *timer[TIMER_COUNT] = {NULL};
+static UART *debug = NULL;
+static GPT *sendTimer = NULL;
 
-static Socket *socket             = NULL;
-
-static unsigned gpioOut[2] = {0, 1};
+static Socket *socket = NULL;
 
 static volatile unsigned msgCounter = 0;
 
@@ -52,22 +42,20 @@ typedef struct CallbackNode {
     bool enqueued;
     struct CallbackNode *next;
     void *data;
-    void (*cb)(void*);
+    void (*cb)(void *);
 } CallbackNode;
 
 static void EnqueueCallback(CallbackNode *node);
 
 // Msg callbacks
 // Prints an array of bytes
-static void printBytes(const uint8_t *bytes, uintptr_t start, uintptr_t size)
-{
+static void printBytes(const uint8_t *bytes, uintptr_t start, uintptr_t size) {
     for (unsigned i = start; i < size; i++) {
         UART_Printf(debug, "%x", bytes[i]);
     }
 }
 
-static void printComponentId(const Component_Id *compId)
-{
+static void printComponentId(const Component_Id *compId) {
     UART_Printf(debug, "%lx-%x-%x", compId->seg_0, compId->seg_1, compId->seg_2);
     UART_Print(debug, "-");
     printBytes(compId->seg_3_4, 0, 2);
@@ -76,14 +64,12 @@ static void printComponentId(const Component_Id *compId)
     UART_Print(debug, "\r\n");
 }
 
-static void handleSendMsgTimer(void* data)
-{
-    static const Component_Id A7ID =
-    {
-        .seg_0   = 0x25025d2c,
-        .seg_1   = 0x66da,
-        .seg_2   = 0x4448,
-        .seg_3_4 = {0xba, 0xe1, 0xac, 0x26, 0xfc, 0xdd, 0x36, 0x27}
+static void handleSendMsgTimer(void *data) {
+    static const Component_Id A7ID = {
+        .seg_0 = 0x25025d2c,
+        .seg_1 = 0x66da,
+        .seg_2 = 0x4448,
+        .seg_3_4 = {0xba, 0xe1, 0xac, 0x26, 0xfc, 0xdd, 0x36, 0x27},
     };
 
     static char msg[] = "rt-app-to-hl-app-00";
@@ -91,6 +77,7 @@ static void handleSendMsgTimer(void* data)
 
     msg[msgLen - 2] = '0' + (msgCounter % 10);
     msg[msgLen - 3] = '0' + (msgCounter / 10);
+    msgCounter = (msgCounter + 1) % 100;
 
     int32_t error = Socket_Write(socket, &A7ID, msg, msgLen);
 
@@ -99,17 +86,15 @@ static void handleSendMsgTimer(void* data)
     }
 }
 
-static void handleSendMsgTimerWrapper(GPT *timer)
-{
+static void handleSendMsgTimerWrapper(GPT *timer) {
     (void)(timer);
 
     static CallbackNode cbn = {.enqueued = false, .cb = handleSendMsgTimer, .data = NULL};
     EnqueueCallback(&cbn);
 }
 
-static void handleRecvMsg(void *handle)
-{
-    Socket *socket = (Socket*)handle;
+static void handleRecvMsg(void *handle) {
+    Socket *socket = (Socket *)handle;
 
     Component_Id senderId;
     static char msg[32];
@@ -126,8 +111,7 @@ static void handleRecvMsg(void *handle)
     printComponentId(&senderId);
 }
 
-static void handleRecvMsgWrapper(Socket *handle)
-{
+static void handleRecvMsgWrapper(Socket *handle) {
     static CallbackNode cbn = {.enqueued = false, .cb = handleRecvMsg, .data = NULL};
 
     if (!cbn.data) {
@@ -136,60 +120,9 @@ static void handleRecvMsgWrapper(Socket *handle)
     EnqueueCallback(&cbn);
 }
 
-// Button Callbacks
-// Enqueued when user presses A
-static void buttonA(void *data)
-{
-    (void)data;
-    msgCounter = (msgCounter + 1) % 100;
-    UART_Printf(debug, "Incrementing counter: %u\r\n", msgCounter);
-}
-
-// Enqueued when user presses B
-static void buttonB(void *data)
-{
-    (void)data;
-    msgCounter = (msgCounter - 1) % 100;
-    UART_Printf(debug, "Decrementing counter: %u\r\n", msgCounter);
-}
-
-typedef struct ButtonState {
-    bool         prevState;
-    CallbackNode cbn;
-    uint32_t     gpioPin;
-} ButtonState;
-
-static ButtonState buttons[NUM_BUTTONS] = {
-    {.prevState = true,
-     .cbn = {.enqueued = false, .cb = buttonA, .data = NULL},
-     .gpioPin   = 12},
-    {.prevState = true,
-     .cbn = {.enqueued = false, .cb = buttonB, .data = NULL},
-     .gpioPin   = 13}
-};
-
-static void handleButtonCallback(GPT *handle)
-{
-    (void)(handle);
-    // Assume initial state is high, i.e. button not pressed.
-    bool newState, pressed;
-
-    for (unsigned i = 0; i < NUM_BUTTONS; i++) {
-        GPIO_Read(buttons[i].gpioPin, &newState);
-        if (newState != buttons[i].prevState) {
-            pressed = !newState;
-            if (pressed) {
-                EnqueueCallback(&buttons[i].cbn);
-            }
-        }
-        buttons[i].prevState = newState;
-    }
-}
-
 static CallbackNode *volatile callbacks = NULL;
 
-static void EnqueueCallback(CallbackNode *node)
-{
+static void EnqueueCallback(CallbackNode *node) {
     uint32_t prevBasePri = NVIC_BlockIRQs();
     if (!node->enqueued) {
         CallbackNode *prevHead = callbacks;
@@ -200,8 +133,7 @@ static void EnqueueCallback(CallbackNode *node)
     NVIC_RestoreIRQs(prevBasePri);
 }
 
-static void InvokeCallbacks(void)
-{
+static void InvokeCallbacks(void) {
     CallbackNode *node;
     do {
         uint32_t prevBasePri = NVIC_BlockIRQs();
@@ -218,8 +150,7 @@ static void InvokeCallbacks(void)
     } while (node);
 }
 
-_Noreturn void RTCoreMain(void)
-{
+_Noreturn void RTCoreMain(void) {
     VectorTableInit();
     CPUFreq_Set(197600000);
 
@@ -228,13 +159,10 @@ _Noreturn void RTCoreMain(void)
     UART_Print(debug, "IntercoreComms_MT3620_BareMetal\r\n");
     UART_Print(debug, "App built on: " __DATE__ " " __TIME__ "\r\n");
 
-    // Initialise timers and supported speeds
-    for (unsigned i = 0; i < TIMER_COUNT; i++) {
-        timer[i] = GPT_Open(MT3620_UNIT_GPT0 + i, MT3620_GPT_012_HIGH_SPEED, GPT_MODE_REPEAT);
-        if (!timer[i]) {
-            UART_Printf(debug,
-                "ERROR: GPT%u initialisation failed\r\n", i);
-        }
+    // Initialise timer
+    sendTimer = GPT_Open(MT3620_UNIT_GPT3, MT3620_GPT_3_SRC_CLK_HZ, GPT_MODE_REPEAT);
+    if (!sendTimer) {
+        UART_Printf(debug, "ERROR: GPT3 initialisation failed\r\n");
     }
 
     // Setup socket
@@ -243,29 +171,9 @@ _Noreturn void RTCoreMain(void)
         UART_Printf(debug, "ERROR: socket initialisation failed\r\n");
     }
 
-    GPIO_ConfigurePinForInput(buttons[0].gpioPin);
-    GPIO_ConfigurePinForInput(buttons[1].gpioPin);
-    GPIO_ConfigurePinForOutput(gpioOut[0]);
-    GPIO_ConfigurePinForOutput(gpioOut[1]);
-
-    // Setup buttons
-    int32_t error;
-    if ((error = GPT_SetMode(timer[TIMER_BUTTONS], GPT_MODE_REPEAT)) != ERROR_NONE) {
-        UART_Printf(debug, "ERROR: Button GPT_SetMode failed %ld\r\n", error);
-    }
-    if ((error = GPT_StartTimeout(
-        timer[TIMER_BUTTONS], 100, GPT_UNITS_MILLISEC,
-        handleButtonCallback)) != ERROR_NONE) {
-        UART_Printf(debug, "ERROR: Button GPT_StartTimeout failed %ld\r\n", error);
-    }
-
     // Setup Msg out
-    if ((error = GPT_SetMode(timer[TIMER_SEND_MSG], GPT_MODE_REPEAT)) != ERROR_NONE) {
-        UART_Printf(debug, "ERROR: Msg GPT_SetMode failed %ld\r\n", error);
-    }
-    if ((error = GPT_StartTimeout(
-        timer[TIMER_SEND_MSG], 1, GPT_UNITS_SECOND,
-        handleSendMsgTimerWrapper)) != ERROR_NONE) {
+    int32_t error;
+    if ((error = GPT_StartTimeout(sendTimer, 5, GPT_UNITS_MICROSEC, handleSendMsgTimerWrapper)) != ERROR_NONE) {
         UART_Printf(debug, "ERROR: Msg GPT_StartTimeout failed %ld\r\n", error);
     }
 
